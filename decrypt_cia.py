@@ -70,7 +70,8 @@ def decrypt_ncch(g, part_offset):
         return
     NK2C = derive_key(0x2C, KeyY)
     if pf[7] & 0x01:
-        NK = 0; NK2C = 0
+        NK = 0
+        NK2C = 0
         print("  Key: Zero Key")
     else:
         keyX_id = CRYPTO_FLAG_MAP.get(pf[3], 0x2C)
@@ -79,13 +80,16 @@ def decrypt_ncch(g, part_offset):
     sectorsize = 0x200
     if exhdr_len > 0:
         g.seek(part_offset + sectorsize)
-        data = g.read(0x800); g.seek(part_offset + sectorsize)
+        data = g.read(0x800)
+        g.seek(part_offset + sectorsize)
         ctr = Counter.new(128, initial_value=plain_iv)
         g.write(AES.new(to_bytes(NK2C), AES.MODE_CTR, counter=ctr).decrypt(data))
         print("  ExHeader decrypted.")
     if exefs_len > 0:
         pos = part_offset + exefs_off * sectorsize
-        g.seek(pos); data = g.read(sectorsize); g.seek(pos)
+        g.seek(pos)
+        data = g.read(sectorsize)
+        g.seek(pos)
         ctr = Counter.new(128, initial_value=exefs_iv)
         g.write(AES.new(to_bytes(NK2C), AES.MODE_CTR, counter=ctr).decrypt(data))
         print("  ExeFS filename table decrypted.")
@@ -93,51 +97,67 @@ def decrypt_ncch(g, part_offset):
         if exefs_data_size > 0:
             ctroffset = sectorsize // 0x10
             pos2 = part_offset + (exefs_off + 1) * sectorsize
-            g.seek(pos2); data = g.read(exefs_data_size); g.seek(pos2)
+            g.seek(pos2)
+            data = g.read(exefs_data_size)
+            g.seek(pos2)
             ctr = Counter.new(128, initial_value=exefs_iv + ctroffset)
             g.write(AES.new(to_bytes(NK2C), AES.MODE_CTR, counter=ctr).decrypt(data))
             print("  ExeFS decrypted.")
     if romfs_off != 0:
         romfs_size = romfs_len * sectorsize
         pos = part_offset + romfs_off * sectorsize
-        g.seek(pos); data = g.read(romfs_size); g.seek(pos)
+        g.seek(pos)
+        data = g.read(romfs_size)
+        g.seek(pos)
         ctr = Counter.new(128, initial_value=romfs_iv)
         g.write(AES.new(to_bytes(NK), AES.MODE_CTR, counter=ctr).decrypt(data))
         print("  RomFS decrypted.")
-    g.seek(part_offset + 0x18B); g.write(struct.pack('<B', 0x00))
+    g.seek(part_offset + 0x18B)
+    g.write(struct.pack('<B', 0x00))
     g.seek(part_offset + 0x18F)
     flag = (pf[7] & ((0x01 | 0x20) ^ 0xFF)) | 0x04
     g.write(struct.pack('<B', flag))
 
 def parse_tmd(data, tmd_offset):
-    """Parse TMD to extract content entries using correct signature-aware offsets."""
-    # Signature type determines header size
-    sig_type = struct.unpack('>L', data[tmd_offset:tmd_offset+4])[0]
+    sig_type = struct.unpack('>L', data[tmd_offset:tmd_offset + 4])[0]
     sig_sizes = {
-        0x00010000: 0x200 + 0x3C,  # RSA-4096 SHA1
-        0x00010001: 0x100 + 0x3C,  # RSA-2048 SHA1
-        0x00010002: 0x3C + 0x40,   # EC-SHA1
-        0x00010003: 0x200 + 0x3C,  # RSA-4096 SHA256
-        0x00010004: 0x100 + 0x3C,  # RSA-2048 SHA256
-        0x00010005: 0x3C + 0x40,   # EC-SHA256
+        0x00010000: 0x200 + 0x3C,
+        0x00010001: 0x100 + 0x3C,
+        0x00010002: 0x3C + 0x40,
+        0x00010003: 0x200 + 0x3C,
+        0x00010004: 0x100 + 0x3C,
+        0x00010005: 0x3C + 0x40,
     }
     sig_size = sig_sizes.get(sig_type, 0x100 + 0x3C)
     tmd_header_off = tmd_offset + 4 + sig_size
-
     content_count = struct.unpack('>H', data[tmd_header_off + 0x9E:tmd_header_off + 0xA0])[0]
-    # Content info records start at header+0xC4, each is 0x24 bytes (64 total)
     content_chunk_off = tmd_header_off + 0xC4 + (64 * 0x24)
-
     contents = []
     for i in range(content_count):
         off = content_chunk_off + i * 0x30
-        cid   = struct.unpack('>L', data[off:off+4])[0]
-        cidx  = struct.unpack('>H', data[off+4:off+6])[0]
-        ctype = struct.unpack('>H', data[off+6:off+8])[0]
-        csz   = struct.unpack('>Q', data[off+8:off+16])[0]
+        cid = struct.unpack('>L', data[off:off + 4])[0]
+        cidx = struct.unpack('>H', data[off + 4:off + 6])[0]
+        ctype = struct.unpack('>H', data[off + 6:off + 8])[0]
+        csz = struct.unpack('>Q', data[off + 8:off + 16])[0]
         contents.append((cid, cidx, ctype, csz))
         print(f"  [TMD] Content {cidx}: ID={cid:08X}, size={csz}, encrypted={bool(ctype & 0x1)}")
-    return contents
+    return contents, content_chunk_off
+
+def patch_tmd_flags(out_path, content_chunk_off, contents):
+    with open(out_path, 'rb+') as g:
+        for i, (_, _, ctype, _) in enumerate(contents):
+            off = content_chunk_off + i * 0x30 + 6
+            g.seek(off)
+            g.write(struct.pack('>H', ctype & ~0x1))
+    print("  TMD encryption flags cleared.")
+
+def patch_ticket(out_path, ticket_off, title_key):
+    with open(out_path, 'rb+') as g:
+        g.seek(ticket_off + 0x1BF)
+        g.write(title_key)
+        g.seek(ticket_off + 0x1F1)
+        g.write(b'\x00')
+    print("  Ticket patched with plaintext title key.")
 
 def decrypt_cia(cia_path):
     print(f"\nDecrypting: {cia_path}")
@@ -148,52 +168,54 @@ def decrypt_cia(cia_path):
     with open(cia_path, 'rb') as f:
         raw = f.read()
 
-    header_size  = struct.unpack('<L', raw[0:4])[0]
-    cert_size    = struct.unpack('<L', raw[0x08:0x0C])[0]
-    ticket_size  = struct.unpack('<L', raw[0x0C:0x10])[0]
-    tmd_size     = struct.unpack('<L', raw[0x10:0x14])[0]
+    header_size = struct.unpack('<L', raw[0:4])[0]
+    cert_size = struct.unpack('<L', raw[0x08:0x0C])[0]
+    ticket_size = struct.unpack('<L', raw[0x0C:0x10])[0]
+    tmd_size = struct.unpack('<L', raw[0x10:0x14])[0]
 
-    cert_off    = align64(header_size)
-    ticket_off  = align64(cert_off + cert_size)
-    tmd_off     = align64(ticket_off + ticket_size)
+    cert_off = align64(header_size)
+    ticket_off = align64(cert_off + cert_size)
+    tmd_off = align64(ticket_off + ticket_size)
     content_off = align64(tmd_off + tmd_size)
 
-    print(f"  header={header_size}, cert_off={cert_off}, ticket_off={ticket_off}, tmd_off={tmd_off}, content_off={content_off}")
+    print(f"  header={header_size}, ticket_off={ticket_off}, tmd_off={tmd_off}, content_off={content_off}")
 
-    # Read title key from ticket
-    enc_title_key  = raw[ticket_off + 0x1BF: ticket_off + 0x1CF]
-    ck_index       = raw[ticket_off + 0x1F1]
+    enc_title_key = raw[ticket_off + 0x1BF: ticket_off + 0x1CF]
+    ck_index = raw[ticket_off + 0x1F1]
     title_id_bytes = raw[ticket_off + 0x1DC: ticket_off + 0x1E4]
 
     ck = common_keys.get(ck_index, common_keys[0])
-    title_key = AES.new(ck, AES.MODE_CBC, iv=title_id_bytes + b'\x00'*8).decrypt(enc_title_key)
+    title_key = AES.new(ck, AES.MODE_CBC, iv=title_id_bytes + b'\x00' * 8).decrypt(enc_title_key)
     print(f"  Common key index: {ck_index}, Title ID: {title_id_bytes.hex()}")
 
-    contents = parse_tmd(raw, tmd_off)
+    contents, content_chunk_off = parse_tmd(raw, tmd_off)
+    patch_ticket(out_path, ticket_off, title_key)
 
     with open(out_path, 'rb+') as g:
         cur = content_off
         for cid, cidx, ctype, csz in contents:
             print(f"\nContent {cidx} (ID {cid:08X}, size {csz} bytes)")
             if ctype & 0x1:
-                iv = struct.pack('>H', cidx) + b'\x00'*14
-                data = raw[cur:cur+csz]
+                iv = struct.pack('>H', cidx) + b'\x00' * 14
+                data = raw[cur:cur + csz]
                 cipher = AES.new(title_key, AES.MODE_CBC, iv=iv)
-                blkM = csz // (1024*1024)
-                blkB = csz % (1024*1024)
+                blkM = csz // (1024 * 1024)
+                blkB = csz % (1024 * 1024)
                 dec = b''
                 for i in range(blkM):
-                    dec += cipher.decrypt(data[i*1024*1024:(i+1)*1024*1024])
-                    print(f"\r  CBC: {i+1}/{blkM+1} MB...", end='', flush=True)
+                    dec += cipher.decrypt(data[i * 1024 * 1024:(i + 1) * 1024 * 1024])
+                    print(f"\r  CBC: {i + 1}/{blkM + 1} MB...", end='', flush=True)
                 if blkB:
-                    chunk = data[blkM*1024*1024:]
+                    chunk = data[blkM * 1024 * 1024:]
                     pad = (-len(chunk)) % 16
-                    dec += cipher.decrypt(chunk + b'\x00'*pad)[:len(chunk)]
+                    dec += cipher.decrypt(chunk + b'\x00' * pad)[:len(chunk)]
                 print(f"\r  CBC layer decrypted ({csz} bytes).     ")
-                g.seek(cur); g.write(dec)
+                g.seek(cur)
+                g.write(dec)
             decrypt_ncch(g, cur)
             cur += csz
 
+    patch_tmd_flags(out_path, content_chunk_off, contents)
     print(f"\nDone: {out_path}")
 
 if __name__ == "__main__":
