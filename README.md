@@ -2,7 +2,7 @@
 
 Python scripts to decrypt `.3ds` and `.cia` ROM files for use in modern 3DS emulators such as [Azahar](https://azahar-emu.org/) (formerly Citra). No external binaries, no `boot9.bin` required. all cryptographic keys are hardcoded directly in the scripts.
 
-Alternatively you could replace the harcoded key bytes in the scrupt with a key file loader using as explained here: 
+Alternatively you could replace the harcoded key bytes in the script with a key file loader using as explained here: 
 https://r-roms.github.io/Nintendo/nintendo-3ds
 
 ***
